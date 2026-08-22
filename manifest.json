@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.nepomuk-software.kubecontext",
+  "name": "KubeContext",
+  "version": "1.0.0",
+  "author": "Nepomuk Software",
+  "license": "MIT",
+  "description": "Shows the active Kubernetes context in the bar, switches between contexts, and gives a short overview of the selected cluster.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "KubeContext",
+    "description": "Current kubectl context in the bar, one click to switch, plus nodes, pods and namespaces of the selected cluster.",
+    "category": "Developer Tools",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showContext": true,
+      "maxLabel": 18,
+      "contextIntervalSec": 5,
+      "probeIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "showContext",
+        "type": "boolean",
+        "label": "Context name in the bar",
+        "description": "Shows the active context next to the icon. Ignored on vertical bars.",
+        "defaultValue": true
+      },
+      {
+        "key": "maxLabel",
+        "type": "integer",
+        "label": "Maximum label length",
+        "description": "Longer context names are elided in the bar.",
+        "min": 4,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 18
+      },
+      {
+        "key": "contextIntervalSec",
+        "type": "integer",
+        "label": "Kubeconfig interval (seconds)",
+        "description": "How often the kubeconfig is re-read so the bar follows a context changed in a terminal. Local file read, no network.",
+        "min": 2,
+        "max": 300,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "probeIntervalSec",
+        "type": "integer",
+        "label": "Cluster interval (seconds)",
+        "description": "How often clusters are contacted while the panel is open. Nothing leaves the machine while it is closed.",
+        "min": 10,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 30
+      }
+    ]
+  }
+}
