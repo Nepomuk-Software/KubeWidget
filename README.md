@@ -38,7 +38,7 @@ missing the panel says so instead of showing an empty list.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/Nepomuk-Software/KubeContext.git --enable
+omarchy plugin add https://github.com/Nepomuk-Software/KubeWidget.git --enable
 ```
 
 ## What it writes
