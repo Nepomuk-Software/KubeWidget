@@ -30,7 +30,8 @@ Panel {
     if (kube.kubectlMissing) return "kubectl is not installed"
     if (!kube.currentContext) return "No Kubernetes context selected"
     var e = kube.currentEntry
-    return "Context " + kube.currentContext + (e && e.server ? "\n" + Model.shortServer(e.server) : "")
+    return "Context " + Model.plain(kube.currentContext)
+           + (e && e.server ? "\n" + Model.plain(Model.shortServer(e.server)) : "")
   }
 
   function handlePress(mouseButton) {
@@ -96,7 +97,7 @@ Panel {
     id: labelFace
     WidgetButton {
       bar: root.bar
-      text: "󱃾  " + kube.barLabel
+      text: "󱃾  " + Model.plain(kube.barLabel)
       dimmed: !kube.currentContext
       tooltipText: root.barTooltip
       fontSize: Style.font.caption
@@ -148,13 +149,14 @@ Panel {
               width: parent.width
               title: "Kubernetes"
               meta: kube.kubectlMissing ? "kubectl not installed"
-                    : kube.currentContext ? kube.currentContext
+                    : kube.currentContext ? Model.plain(kube.currentContext)
                     : "no context selected"
-              detail: kube.overviewReady ? (kube.overview.serverVersion || "") : ""
+              detail: kube.overviewReady ? Model.plain(kube.overview.serverVersion || "") : ""
               foreground: root.foreground
               fontFamily: root.fontFamily
               iconComponent: Component {
                 Text {
+                  textFormat: Text.PlainText
                   text: "󱃾"
                   color: kube.currentReachable ? root.foreground : root.dim
                   font.family: root.fontFamily
@@ -165,6 +167,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: kube.currentEntry !== null
             width: parent.width
             text: kube.currentEntry ? Model.shortServer(kube.currentEntry.server) : ""
@@ -175,6 +178,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: kube.lastError !== ""
             width: parent.width
             text: kube.lastError
@@ -199,6 +203,7 @@ Panel {
             // Three distinct states, and none of them may be shown as another:
             // not asked yet, asked and silent, asked and answered.
             Text {
+              textFormat: Text.PlainText
               visible: !kube.overviewReady
               width: parent.width
               text: !kube.currentProbed ? "Checking…"
@@ -267,6 +272,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: kube.kubectlMissing
               width: parent.width
               text: "kubectl was not found on PATH, so there is nothing to read."
@@ -277,6 +283,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: !kube.kubectlMissing && kube.contexts.length === 0
               width: parent.width
               text: "No contexts in the kubeconfig."
@@ -318,6 +325,7 @@ Panel {
     spacing: Style.space(8)
 
     Text {
+      textFormat: Text.PlainText
       id: pairLabel
       text: parent.label
       color: root.foreground
@@ -330,6 +338,7 @@ Panel {
       height: 1
     }
     Text {
+      textFormat: Text.PlainText
       id: pairValue
       text: parent.value
       color: root.foreground
@@ -381,6 +390,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: state
       anchors.right: parent.right
       anchors.rightMargin: Style.space(6)
@@ -403,6 +413,7 @@ Panel {
       spacing: 0
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: row.modelData.name
         color: root.foreground
@@ -411,6 +422,7 @@ Panel {
         elide: Text.ElideRight
       }
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         text: {
           var bits = [Model.shortServer(row.modelData.server)]

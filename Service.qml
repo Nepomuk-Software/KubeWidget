@@ -135,7 +135,7 @@ Item {
         root.refreshOverview()
         root.switched(name, true, "switched")
       } else {
-        root.lastError = String(stderr.text || "").trim() || "could not switch context"
+        root.lastError = Model.clamp(stderr.text, Model.MAX_FIELD).trim() || "could not switch context"
         root.switched(name, false, root.lastError)
       }
     }
