@@ -3,6 +3,8 @@
 Shows the active `kubectl` context in the bar, switches between contexts with a
 click, and gives a short overview of the selected cluster.
 
+*(Deutsche Fassung: [README.de.md](README.de.md).)*
+
 ![Preview](preview.png)
 
 - **Bar** — the current context name next to a Kubernetes icon, so the context
