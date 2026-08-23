@@ -45,6 +45,19 @@ sagt das Panel das, statt eine leere Liste zu zeigen.
 omarchy plugin add https://github.com/Nepomuk-Software/KubeWidget.git --enable
 ```
 
+## Deinstallation
+
+```bash
+omarchy plugin remove io.github.nepomuk-software.kubecontext
+```
+
+Das nimmt das Widget aus der Bar und löscht das Plugin-Verzeichnis. Mehr ist
+nicht rückgängig zu machen: Es legt keine Dateien außerhalb dieses
+Verzeichnisses an, keine Dienste und keinen privilegierten Helfer. Das Einzige,
+was es schreiben kann, ist `current-context` in deiner kubeconfig — derselbe
+Wert, den `kubectl config use-context` setzt, und er bleibt so, wie du ihn
+zuletzt hattest.
+
 ## Was es schreibt
 
 Eine einzige Sache, und nur auf ausdrücklichen Klick:

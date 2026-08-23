@@ -43,6 +43,18 @@ missing the panel says so instead of showing an empty list.
 omarchy plugin add https://github.com/Nepomuk-Software/KubeWidget.git --enable
 ```
 
+## Uninstall
+
+```bash
+omarchy plugin remove io.github.nepomuk-software.kubecontext
+```
+
+That takes the widget out of the bar and deletes the plugin directory. There is
+nothing else to undo: it installs no files outside that directory, no services
+and no privileged helper. The one thing it can write is `current-context` in
+your kubeconfig, which is the same value `kubectl config use-context` sets, and
+it stays as you left it.
+
 ## What it writes
 
 One thing, on an explicit click: `kubectl config use-context <name>`, which sets
