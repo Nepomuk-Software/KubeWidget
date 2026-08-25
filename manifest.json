@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.nepomuk-software.kubecontext",
   "name": "KubeContext",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Nepomuk Software",
   "license": "MIT",
-  "description": "Shows the active Kubernetes context in the bar, switches between contexts, and gives a short overview of the selected cluster.",
+  "description": "Shows the active Kubernetes context in the bar, switches between contexts and namespaces, and gives a short overview of the selected cluster.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,12 +14,13 @@
   },
   "barWidget": {
     "displayName": "KubeContext",
-    "description": "Current kubectl context in the bar, one click to switch, plus nodes, pods and namespaces of the selected cluster.",
+    "description": "Current kubectl context in the bar, right-click to switch, plus nodes, pods and namespace of the selected cluster.",
     "category": "Developer Tools",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "showContext": true,
+      "showNamespace": false,
       "maxLabel": 18,
       "contextIntervalSec": 5,
       "probeIntervalSec": 30
@@ -31,6 +32,13 @@
         "label": "Context name in the bar",
         "description": "Shows the active context next to the icon. Ignored on vertical bars.",
         "defaultValue": true
+      },
+      {
+        "key": "showNamespace",
+        "type": "boolean",
+        "label": "Namespace in the bar",
+        "description": "Appends /namespace to the context label. Ignored when the context name is hidden or the bar is vertical.",
+        "defaultValue": false
       },
       {
         "key": "maxLabel",

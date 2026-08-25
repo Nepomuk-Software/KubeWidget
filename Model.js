@@ -135,6 +135,21 @@ function overviewScript(context) {
   ].join(" "))
 }
 
+// Namespaces of one context. The API has to answer, so this is the same
+// bound as the overview and is only asked for the current context while the
+// panel is open — never for every row, never from the picker.
+function namespacesScript(context) {
+  var c = shellQuote(context)
+  return capped([
+    "ctx=" + c + ";",
+    "k() { timeout " + HARD_TIMEOUT + " kubectl --context \"$ctx\" --request-timeout=" + NET_TIMEOUT + "s \"$@\" 2>/dev/null; };",
+    "ver=$(k get --raw /version | head -c " + RAW_CAPTURE + ");",
+    "printf '%s' \"$ver\" | grep -q gitVersion || { printf 'reachable=0\\n'; exit 0; };",
+    "printf 'reachable=1\\n';",
+    "k get namespaces --no-headers | head -c " + LIST_CAPTURE + " | awk '{print \"ns=\" $1}'"
+  ].join(" "))
+}
+
 // ── Parsing ────────────────────────────────────────────────────────────────
 
 function parseKeyValues(raw) {
@@ -181,6 +196,132 @@ function parseProbes(raw) {
     out[f[0]] = { reachable: f[1] === "1", ms: Number(f[2] || 0), version: f[3] || "" }
   }
   return out
+}
+
+// RFC 1123 DNS label, which is what a namespace name is. Anything else is
+// dropped from the list so it can never become an argument to kubectl.
+function validNamespace(name) {
+  var s = String(name || "")
+  if (s.length < 1 || s.length > 63) return false
+  return /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(s)
+}
+
+// Kind names the kubeconfig context `kind-<cluster>`. The node container is
+// `<cluster>-control-plane`. That is a local docker/kind fact, not an API
+// one, so it can tell "the VM is down" from "the API did not answer".
+function kindClusterName(entry) {
+  var n = String(entry && entry.name != null ? entry.name : entry || "")
+  var c = String(entry && entry.cluster ? entry.cluster : "")
+  if (n.indexOf("kind-") === 0) return n.substring(5)
+  if (c.indexOf("kind-") === 0) return c.substring(5)
+  return ""
+}
+
+function kindStatusScript(entries) {
+  if (!entries || entries.length === 0) return "true"
+  var jobs = []
+  for (var i = 0; i < entries.length; i++) {
+    var cluster = kindClusterName(entries[i])
+    if (!cluster) continue
+    jobs.push({
+      ctx: shellQuote(entries[i].name || entries[i]),
+      cluster: shellQuote(cluster),
+      node: shellQuote(cluster + "-control-plane")
+    })
+  }
+  if (jobs.length === 0) return "true"
+  var loop = []
+  for (var j = 0; j < jobs.length; j++)
+    loop.push("check " + jobs[j].ctx + " " + jobs[j].node + " " + jobs[j].cluster + " &")
+  return capped([
+    "check() {",
+    "  ctx=$1; node=$2; cl=$3;",
+    "  if command -v docker >/dev/null 2>&1; then",
+    "    [ -n \"$(timeout 2 docker ps -q --filter label=io.x-k8s.kind.cluster=\"$cl\")\" ]",
+    "      && { printf 'kind=%s|running\\n' \"$ctx\"; return; };",
+    "    [ -n \"$(timeout 2 docker ps -aq --filter label=io.x-k8s.kind.cluster=\"$cl\")\" ]",
+    "      && { printf 'kind=%s|stopped\\n' \"$ctx\"; return; };",
+    "    st=$(timeout 2 docker inspect -f '{{.State.Running}}' \"$node\" 2>/dev/null);",
+    "    [ \"$st\" = true ] && { printf 'kind=%s|running\\n' \"$ctx\"; return; };",
+    "    [ \"$st\" = false ] && { printf 'kind=%s|stopped\\n' \"$ctx\"; return; };",
+    "  fi;",
+    "  if command -v kind >/dev/null 2>&1; then",
+    "    timeout 2 kind get nodes --name \"$cl\" 2>/dev/null | grep -q .",
+    "      && { printf 'kind=%s|running\\n' \"$ctx\"; return; };",
+    "    timeout 2 kind get clusters 2>/dev/null | grep -qx \"$cl\"",
+    "      && { printf 'kind=%s|stopped\\n' \"$ctx\"; return; };",
+    "  fi;",
+    "  printf 'kind=%s|unknown\\n' \"$ctx\";",
+    "};",
+    loop.join(" "),
+    "wait"
+  ].join(" "))
+}
+
+// Kind has no start/stop CLI. The nodes are docker containers labeled
+// io.x-k8s.kind.cluster=<name>, so start/stop is docker start/stop of those.
+// The cluster name is interpolated only after validKindCluster(), so the
+// filter cannot become a docker CLI injection.
+function validKindCluster(name) {
+  var s = String(name || "")
+  if (s.length < 1 || s.length > 63) return false
+  return /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(s)
+}
+
+function kindPowerScript(cluster, direction) {
+  if (!validKindCluster(cluster))
+    return "echo invalid kind cluster name >&2; exit 1"
+  var action = direction === "start" ? "start" : "stop"
+  var limit = action === "stop" ? 40 : 25
+  return capped([
+    "command -v docker >/dev/null 2>&1 || { echo docker is not available >&2; exit 1; };",
+    "ids=$(timeout 3 docker ps -aq --filter label=io.x-k8s.kind.cluster=" + cluster + ");",
+    "[ -n \"$ids\" ] || { echo no Kind node containers found >&2; exit 1; };",
+    "timeout " + limit + " docker " + action + " $ids >/dev/null || exit 1;",
+    "ccm=cloud-provider-kind-" + cluster + ";",
+    "if timeout 2 docker inspect \"$ccm\" >/dev/null 2>&1; then",
+    "  timeout " + limit + " docker " + action + " \"$ccm\" >/dev/null || true;",
+    "fi;",
+    "printf done\\n"
+  ].join(" "))
+}
+
+function parseKindStatus(raw) {
+  var out = {}
+  var lines = clamp(raw).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf("kind=") !== 0) continue
+    var f = lines[i].substring(5).split("|")
+    if (f[0] && f[1]) out[f[0]] = f[1]
+  }
+  return out
+}
+
+function parseNamespaces(raw) {
+  var names = []
+  var reachable = false
+  var lines = clamp(raw).split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf("reachable=") === 0) {
+      reachable = lines[i].substring(10) === "1"
+      continue
+    }
+    if (lines[i].indexOf("ns=") !== 0) continue
+    var n = lines[i].substring(3)
+    if (validNamespace(n)) names.push(n)
+  }
+  return { reachable: reachable, names: names }
+}
+
+function sortNamespaces(names, current) {
+  var list = (names || []).slice()
+  list.sort()
+  var i = list.indexOf(current)
+  if (i > 0) {
+    list.splice(i, 1)
+    list.unshift(current)
+  }
+  return list
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────

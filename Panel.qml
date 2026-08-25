@@ -8,10 +8,11 @@ import "Model.js" as Model
 
 // Bar face plus popup for Kubernetes contexts.
 //
-//   left = panel · right = refresh · middle = refresh
+//   left = panel · right = context picker · middle = refresh
 //
-// Everything here is read-only except one action: clicking a context writes
-// current-context into the kubeconfig.
+// Everything here is read-only except two actions, both explicit clicks:
+// switching current-context, and setting the current namespace. The picker
+// does the first without talking to any cluster.
 Panel {
   id: root
   moduleName: "io.github.nepomuk-software.kubecontext"
@@ -26,17 +27,97 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool vertical: bar ? bar.vertical : false
 
+  property bool nsOpen: false
+  property int contextIndex: 0
+  property bool cursorActive: false
+  property int nsIndex: 0
+  property bool nsCursorActive: false
+
+  property bool quickOpen: false
+  property int quickIndex: 0
+  property bool quickCursorActive: false
+
+  readonly property bool quickAvailable: !kube.kubectlMissing && kube.contexts.length > 0
+
   readonly property string barTooltip: {
     if (kube.kubectlMissing) return "kubectl is not installed"
     if (!kube.currentContext) return "No Kubernetes context selected"
+    var lines = ["Context " + Model.plain(kube.currentContext)]
     var e = kube.currentEntry
-    return "Context " + Model.plain(kube.currentContext)
-           + (e && e.server ? "\n" + Model.plain(Model.shortServer(e.server)) : "")
+    if (e && e.namespace) lines.push("Namespace " + Model.plain(e.namespace))
+    if (e && e.server) lines.push(Model.plain(Model.shortServer(e.server)))
+    if (kube.currentProbe && kube.currentProbe.reachable === false)
+      lines.push("Last seen unreachable")
+    else if (kube.overviewReady && kube.podsBad > 0)
+      lines.push(kube.podsBad + " pod" + (kube.podsBad === 1 ? "" : "s") + " not running")
+    if (root.quickAvailable) lines.push("right-click to pick a context")
+    return lines.join("\n")
   }
 
   function handlePress(mouseButton) {
-    if (mouseButton === Qt.LeftButton) root.toggle()
-    else kube.refreshAll()
+    if (mouseButton === Qt.RightButton) {
+      if (root.quickAvailable) root.quickOpen ? quickOwner.close() : root.openQuick()
+    } else if (mouseButton === Qt.MiddleButton) {
+      if (root.opened) kube.refreshAll()
+      else kube.refreshContexts()
+    } else {
+      if (root.quickOpen) quickOwner.close()
+      root.toggle()
+    }
+  }
+
+  function openQuick() {
+    kube.refreshContexts()
+    quickIndex = 0
+    for (var i = 0; i < kube.contexts.length; i++) {
+      if (kube.contexts[i].current) { quickIndex = i; break }
+    }
+    quickCursorActive = false
+    quickOpen = true
+  }
+
+  function moveQuickCursor(dy) {
+    quickCursorActive = true
+    if (kube.contexts.length === 0) return
+    quickIndex = Math.max(0, Math.min(kube.contexts.length - 1, quickIndex + dy))
+  }
+
+  function moveCursor(dy) {
+    cursorActive = true
+    if (kube.contexts.length === 0) return
+    contextIndex = Math.max(0, Math.min(kube.contexts.length - 1, contextIndex + dy))
+  }
+
+  function activateCursor() {
+    if (!cursorActive || kube.contexts.length === 0) return
+    var c = kube.contexts[contextIndex]
+    if (c && !c.current) kube.switchTo(c.name)
+  }
+
+  function moveNsCursor(dy) {
+    nsCursorActive = true
+    if (kube.namespaces.length === 0) return
+    nsIndex = Math.max(0, Math.min(kube.namespaces.length - 1, nsIndex + dy))
+  }
+
+  function activateNsCursor() {
+    if (!nsCursorActive || kube.namespaces.length === 0) return
+    var n = kube.namespaces[nsIndex]
+    if (n) kube.setNamespace(n)
+  }
+
+  onOpenedChanged: if (!opened) {
+    nsOpen = false
+    cursorActive = false
+    nsCursorActive = false
+  }
+
+  Connections {
+    target: kube
+    function onCurrentContextChanged() {
+      root.nsOpen = false
+      root.nsCursorActive = false
+    }
   }
 
   Service {
@@ -52,22 +133,36 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { kube.refreshAll(); return "ok" }
     function current(): string { return kube.currentContext || "none" }
+    function namespace(): string { return kube.currentNamespace }
     function use(context: string): string {
       kube.switchTo(context)
       return kube.switching === context ? "switching" : "unchanged"
+    }
+    function useNamespace(name: string): string {
+      kube.setNamespace(name)
+      return kube.settingNamespace === name ? "setting" : "unchanged"
+    }
+    function kindStart(): string {
+      kube.startKind()
+      return kube.kindBusy === "starting" ? "starting" : "unchanged"
+    }
+    function kindStop(): string {
+      kube.stopKind()
+      return kube.kindBusy === "stopping" ? "stopping" : "unchanged"
     }
     function status(): string {
       if (kube.kubectlMissing) return "no kubectl"
       if (!kube.currentContext) return "no context"
       var p = kube.probes[kube.currentContext]
       if (!p) return kube.currentContext + " unprobed"
-      if (!p.reachable) return kube.currentContext + " unreachable"
+      if (!p.reachable)
+        return kube.currentContext + (kube.currentKind === "stopped" ? " kind-stopped" : " unreachable")
       var o = kube.overview
       var line = kube.currentContext + " reachable " + p.version
+              + " ns=" + kube.currentNamespace
       if (kube.overviewReady)
         line += " nodes=" + (o.nodesReady || "0") + "/" + (o.nodesTotal || "0")
               + " pods=" + (o.podsRunning || "0") + "/" + (o.podsTotal || "0")
-              + " ns=" + (o.namespaces || "0")
       return line
     }
   }
@@ -88,6 +183,7 @@ Panel {
       bar: root.bar
       text: "󱃾"
       dimmed: !kube.currentContext
+      active: kube.barAttention
       tooltipText: root.barTooltip
       onPressed: function (b) { root.handlePress(b) }
     }
@@ -99,6 +195,7 @@ Panel {
       bar: root.bar
       text: "󱃾  " + Model.plain(kube.barLabel)
       dimmed: !kube.currentContext
+      active: kube.barAttention
       tooltipText: root.barTooltip
       fontSize: Style.font.caption
       onPressed: function (b) { root.handlePress(b) }
@@ -121,7 +218,28 @@ Panel {
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
-      onTextKey: function (t) { if (String(t).toLowerCase() === "r") kube.refreshAll() }
+      onMoveRequested: function (dx, dy) {
+        if (dy === 0) return
+        if (root.nsOpen) {
+          if (!root.nsCursorActive) { root.nsCursorActive = true; return }
+          root.moveNsCursor(dy)
+        } else {
+          if (!root.cursorActive) { root.cursorActive = true; return }
+          root.moveCursor(dy)
+        }
+      }
+      onActivateRequested: {
+        if (root.nsOpen) root.activateNsCursor()
+        else root.activateCursor()
+      }
+      onTextKey: function (t) {
+        var k = String(t).toLowerCase()
+        if (k === "r") kube.refreshAll()
+        else if (k === "n" && kube.currentContext) {
+          root.nsOpen = !root.nsOpen
+          root.nsCursorActive = false
+        }
+      }
 
       Flickable {
         id: panelFlick
@@ -207,12 +325,29 @@ Panel {
               visible: !kube.overviewReady
               width: parent.width
               text: !kube.currentProbed ? "Checking…"
+                    : kube.currentKind === "stopped"
+                      ? "Kind cluster is not running."
                     : "Not reachable. The context is selected, but the API server did not answer "
                       + "within " + Model.NET_TIMEOUT + " seconds."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
+            }
+
+            Button {
+              visible: kube.kindCluster !== ""
+                       && (kube.currentKind === "running" || kube.currentKind === "stopped")
+              text: kube.kindBusy === "starting" ? "Starting…"
+                    : kube.kindBusy === "stopping" ? "Stopping…"
+                    : kube.currentKind === "running" ? "Stop Kind cluster"
+                    : "Start Kind cluster"
+              iconText: kube.currentKind === "running" ? "󰓛" : "󰐊"
+              bordered: true
+              enabled: kube.kindBusy === ""
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: kube.currentKind === "running" ? kube.stopKind() : kube.startKind()
             }
 
             InfoPair {
@@ -246,15 +381,63 @@ Panel {
               value: kube.overview.kubelet || ""
             }
             InfoPair {
-              // Only present when a metrics server answered.
               visible: kube.overviewReady && (kube.overview.cpuPercent || "") !== ""
               label: "Load"
               value: (kube.overview.cpuPercent || "0") + "% CPU  ·  " + (kube.overview.memPercent || "0") + "% memory"
             }
-            InfoPair {
-              visible: kube.overviewReady && kube.currentEntry !== null
-              label: "Namespace"
-              value: kube.currentEntry ? kube.currentEntry.namespace : ""
+
+            // Local fact from the kubeconfig — shown even when the cluster
+            // did not answer. The list under it is the API's, so it only
+            // appears once that call has returned.
+            Item {
+              width: parent.width
+              implicitHeight: nsPair.implicitHeight
+              visible: kube.currentEntry !== null
+
+              InfoPair {
+                id: nsPair
+                width: parent.width
+                label: "Namespace"
+                value: kube.currentNamespace
+                       + ((kube.currentReachable || kube.namespacesReady)
+                          ? (root.nsOpen ? "  ▾" : "  ▸") : "")
+              }
+              MouseArea {
+                anchors.fill: parent
+                enabled: kube.currentReachable || kube.namespacesReady || !kube.currentProbed
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: {
+                  root.nsOpen = !root.nsOpen
+                  root.nsCursorActive = false
+                }
+              }
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.nsOpen && !kube.namespacesReady && kube.currentProbed && !kube.currentReachable
+              width: parent.width
+              text: "Namespaces cannot be listed while the cluster is unreachable."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              textFormat: Text.PlainText
+              visible: root.nsOpen && !kube.namespacesReady && !(kube.currentProbed && !kube.currentReachable)
+              width: parent.width
+              text: "Listing namespaces…"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            Repeater {
+              model: root.nsOpen && kube.namespacesReady ? kube.namespaces : []
+              NamespaceRow {
+                width: column.width
+              }
             }
           }
 
@@ -297,7 +480,12 @@ Panel {
 
               ContextRow {
                 width: column.width
+                hasCursor: root.cursorActive && root.contextIndex === index
                 onActivated: kube.switchTo(modelData.name)
+                onEntered: {
+                  root.cursorActive = true
+                  root.contextIndex = index
+                }
               }
             }
           }
@@ -309,6 +497,79 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             onClicked: kube.refreshAll()
+          }
+        }
+      }
+    }
+  }
+
+  // ── Quick picker ───────────────────────────────────────────────────────────
+  // Right-click: every context, no probe. A second popup on the same bar slot,
+  // so it carries its own handle — reusing root's would dismiss the panel.
+  QtObject {
+    id: quickOwner
+    property bool popoutSwitchClosing: false
+    function close() { root.quickOpen = false }
+    function closeForPopoutSwitch() {
+      popoutSwitchClosing = true
+      root.quickOpen = false
+      Qt.callLater(function() { popoutSwitchClosing = false })
+    }
+  }
+
+  KeyboardPanel {
+    id: quickPanel
+    anchorItem: face
+    owner: quickOwner
+    bar: root.bar
+    open: root.quickOpen
+    focusTarget: quickKeys
+    contentWidth: quickPanel.fittedContentWidth(Style.space(300))
+    contentHeight: quickPanel.fittedContentHeight(quickColumn.implicitHeight, Style.space(420))
+
+    PanelKeyCatcher {
+      id: quickKeys
+      anchors.fill: parent
+      onMoveRequested: function(dx, dy) {
+        if (!root.quickCursorActive) { root.quickCursorActive = true; return }
+        if (dy !== 0) root.moveQuickCursor(dy)
+      }
+      onActivateRequested: {
+        if (!root.quickCursorActive || kube.contexts.length === 0) return
+        var c = kube.contexts[root.quickIndex]
+        if (c && !c.current) kube.switchTo(c.name)
+        quickOwner.close()
+      }
+      onCloseRequested: quickOwner.close()
+
+      Flickable {
+        id: quickFlick
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: quickColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: quickColumn
+          width: quickFlick.width
+          spacing: Style.space(4)
+
+          PanelSectionHeader {
+            text: "CONTEXTS"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Repeater {
+            model: root.quickOpen ? kube.contexts : []
+
+            QuickRow {
+              width: quickColumn.width
+            }
           }
         }
       }
@@ -348,21 +609,66 @@ Panel {
     }
   }
 
+  component NamespaceRow: Rectangle {
+    id: nsRow
+
+    required property var modelData
+    required property int index
+
+    readonly property string nsName: String(modelData || "")
+    readonly property bool isCurrent: nsName === kube.currentNamespace
+    readonly property bool isSetting: kube.settingNamespace === nsName
+    readonly property bool hasCursor: root.nsCursorActive && root.nsIndex === index
+
+    implicitHeight: Style.spacing.popupRowHeight
+    radius: Style.cornerRadius
+    color: (hasCursor || mouse.containsMouse)
+           ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07)
+           : "transparent"
+
+    MouseArea {
+      id: mouse
+      anchors.fill: parent
+      hoverEnabled: true
+      onClicked: if (!nsRow.isCurrent) kube.setNamespace(nsRow.nsName)
+      onContainsMouseChanged: if (containsMouse) {
+        root.nsCursorActive = true
+        root.nsIndex = nsRow.index
+      }
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(14)
+      anchors.rightMargin: Style.space(6)
+      verticalAlignment: Text.AlignVCenter
+      text: Model.plain(nsRow.nsName) + (nsRow.isSetting ? "  ·  setting…" : (nsRow.isCurrent ? "  ·  current" : ""))
+      color: nsRow.isCurrent ? root.foreground : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      elide: Text.ElideRight
+    }
+  }
+
   component ContextRow: Rectangle {
     id: row
 
     required property var modelData
     required property int index
+    property bool hasCursor: false
 
     readonly property var probe: kube.probes[modelData.name] || null
+    readonly property string kind: kube.kindStates[modelData.name] || ""
     readonly property bool isCurrent: modelData.current === true
     readonly property bool isSwitching: kube.switching === modelData.name
 
     signal activated()
+    signal entered()
 
     implicitHeight: Style.spacing.popupRowHeight + Style.space(8)
     radius: Style.cornerRadius
-    color: mouse.containsMouse
+    color: (hasCursor || mouse.containsMouse)
            ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07)
            : "transparent"
 
@@ -371,6 +677,7 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       onClicked: if (!row.isCurrent) row.activated()
+      onContainsMouseChanged: if (containsMouse) row.entered()
     }
 
     // Filled while selected, outline otherwise. Reachability is a separate
@@ -396,6 +703,7 @@ Panel {
       anchors.rightMargin: Style.space(6)
       anchors.verticalCenter: parent.verticalCenter
       text: row.isSwitching ? "switching…"
+            : row.kind === "stopped" ? "kind stopped"
             : !row.probe ? ""
             : row.probe.reachable ? Model.latency(row.probe.ms) : "unreachable"
       color: row.probe && row.probe.reachable ? root.foreground : root.dim
@@ -431,6 +739,80 @@ Panel {
           if (row.probe && row.probe.reachable && row.probe.version) bits.push(row.probe.version)
           return bits.filter(function (b) { return b !== "" }).join("  ·  ")
         }
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideMiddle
+      }
+    }
+  }
+
+  component QuickRow: Rectangle {
+    id: quickRow
+
+    required property var modelData
+    required property int index
+
+    readonly property bool isCurrent: modelData.current === true
+    readonly property bool isSwitching: kube.switching === modelData.name
+    readonly property bool hasCursor: root.quickCursorActive && root.quickIndex === index
+
+    implicitHeight: Style.spacing.popupRowHeight + Style.space(4)
+    radius: Style.cornerRadius
+    color: hasCursor
+           ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07)
+           : "transparent"
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      onClicked: {
+        if (!quickRow.isCurrent) kube.switchTo(quickRow.modelData.name)
+        quickOwner.close()
+      }
+      onContainsMouseChanged: if (containsMouse) {
+        root.quickCursorActive = true
+        root.quickIndex = quickRow.index
+      }
+    }
+
+    Rectangle {
+      id: quickDot
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(7)
+      height: width
+      radius: width / 2
+      color: quickRow.isCurrent ? root.foreground : "transparent"
+      border.width: 1
+      border.color: quickRow.isCurrent ? root.foreground
+                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
+    }
+
+    Column {
+      anchors.left: quickDot.right
+      anchors.leftMargin: Style.space(10)
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: 0
+
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        text: Model.plain(quickRow.modelData.name)
+              + (quickRow.isSwitching ? "  ·  switching…" : "")
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        elide: Text.ElideRight
+      }
+      Text {
+        textFormat: Text.PlainText
+        visible: (quickRow.modelData.namespace || "") !== ""
+        width: parent.width
+        text: Model.plain(quickRow.modelData.namespace || "default")
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
