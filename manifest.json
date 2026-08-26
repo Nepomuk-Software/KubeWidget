@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.nepomuk-software.kubecontext",
   "name": "KubeContext",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "Nepomuk Software",
   "license": "MIT",
   "description": "Shows the active Kubernetes context in the bar, switches between contexts and namespaces across every kubeconfig in ~/.kube, and gives a short overview of the selected cluster.",
