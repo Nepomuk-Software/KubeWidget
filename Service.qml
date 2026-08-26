@@ -6,16 +6,15 @@ import "Model.js" as Model
 // All state for the Kubernetes context widget.
 //
 // The cheap half — which contexts exist and which one is selected — is a
-// kubeconfig read and runs on a plain timer. The expensive half — is that
-// cluster actually reachable, and what is in it — only runs while someone is
-// looking at the panel, because every one of those calls can hang. The
-// right-click picker is not "looking": it only switches current-context, so
-// `detailed` stays false for it.
+// kubeconfig read and runs on a plain timer. Extra files in ~/.kube are
+// included there; identity is (file, name). The expensive half only runs
+// while the panel is open. The picker is not "looking", so `detailed`
+// stays false for it.
 Item {
   id: root
 
   property var settings: ({})
-  property bool detailed: false        // panel open → probe, overview, namespace list
+  property bool detailed: false
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -28,50 +27,54 @@ Item {
   readonly property int contextIntervalSec: Math.max(2, Number(setting("contextIntervalSec", 5)))
   readonly property int probeIntervalSec: Math.max(10, Number(setting("probeIntervalSec", 30)))
 
-  // ── State ────────────────────────────────────────────────────────────────
   property bool kubectlMissing: false
+  property string defaultFile: ""
+  property string activeFile: ""
   property string currentContext: ""
-  property var contexts: []            // [{name, cluster, namespace, server, current}]
-  property var probes: ({})            // name → {reachable, ms, version}
-  property var overview: ({})          // key/value from overviewScript
-  property string overviewFor: ""      // context the overview belongs to
-  property var namespaces: []          // names for the current context, panel only
+  property var contexts: []
+  property var probes: ({})
+  property var overview: ({})
+  property string overviewFor: ""
+  property var namespaces: []
   property bool namespacesReady: false
-  property string namespacesFor: ""    // context the namespace list belongs to
-  property var kindStates: ({})        // context name → running|stopped|unknown
-  property string kindBusy: ""         // "" | starting | stopping
-  property string switching: ""        // context being switched to
-  property string settingNamespace: "" // namespace being written
+  property string namespacesFor: ""
+  property var kindStates: ({})
+  property string kindBusy: ""
+  property string switching: ""
+  property string settingNamespace: ""
   property string lastError: ""
+  property bool contextsQueued: false
 
   readonly property var currentEntry: {
+    var key = Model.rowKey({ file: activeFile, name: currentContext })
     for (var i = 0; i < contexts.length; i++)
-      if (contexts[i].current) return contexts[i]
+      if (Model.rowKey(contexts[i]) === key) return contexts[i]
     return null
   }
 
   readonly property string currentNamespace: currentEntry && currentEntry.namespace
                                              ? currentEntry.namespace : "default"
+  readonly property string currentKey: Model.rowKey({ file: activeFile, name: currentContext })
+  readonly property bool extraFile: activeFile !== "" && defaultFile !== "" && activeFile !== defaultFile
+  readonly property string activeFileLabel: Model.fileLabel(activeFile)
 
-  readonly property var currentProbe: probes[currentContext] || null
+  readonly property var currentProbe: probes[currentKey] || null
   readonly property bool currentReachable: currentProbe ? currentProbe.reachable : false
-  // Absence of a probe is not the same as a failed one: before the first probe
-  // comes back the panel must say "checking", not "unreachable".
   readonly property bool currentProbed: currentProbe !== null
-  readonly property bool overviewReady: overview.reachable === "1" && overviewFor === currentContext
+  readonly property bool overviewReady: overview.reachable === "1" && overviewFor === currentKey
   readonly property int podsBad: Number(overview.podsBad || 0)
-  readonly property string currentKind: kindStates[currentContext] || ""
+  readonly property string currentKind: kindStates[currentKey] || ""
   readonly property string kindCluster: currentEntry ? Model.kindClusterName(currentEntry) : ""
 
-  // Last known facts only. Must not start a probe: a closed bar that tints
-  // itself by talking to the cluster is a monitor, which this is not.
   readonly property bool barAttention: (currentProbe && currentProbe.reachable === false)
                                     || (overviewReady && podsBad > 0)
 
   readonly property string barLabel: {
     if (kubectlMissing) return "no kubectl"
     if (!currentContext) return "no context"
-    var label = showNamespace ? currentContext + "/" + currentNamespace : currentContext
+    var label = currentContext
+    if (showNamespace) label = currentContext + "/" + currentNamespace
+    if (extraFile) label = activeFileLabel + ":" + label
     return Model.elide(label, maxLabel)
   }
 
@@ -79,9 +82,13 @@ Item {
   signal namespaceSet(string name, bool ok, string message)
   signal kindPowered(string action, bool ok, string message)
 
-  // ── Actions ──────────────────────────────────────────────────────────────
-
-  function refreshContexts() { if (!contextsProc.running) contextsProc.running = true }
+  function refreshContexts() {
+    if (contextsProc.running) {
+      contextsQueued = true
+      return
+    }
+    contextsProc.running = true
+  }
 
   function probeAll() {
     if (!detailed || contexts.length === 0 || probeProc.running) return
@@ -89,14 +96,16 @@ Item {
   }
 
   function refreshOverview() {
-    if (!detailed || !currentContext || overviewProc.running) return
-    overviewProc.requested = currentContext
+    if (!detailed || !currentContext || !activeFile || overviewProc.running) return
+    overviewProc.requestedFile = activeFile
+    overviewProc.requestedName = currentContext
     overviewProc.running = true
   }
 
   function refreshNamespaces() {
-    if (!detailed || !currentContext || nsProc.running) return
-    nsProc.requested = currentContext
+    if (!detailed || !currentContext || !activeFile || nsProc.running) return
+    nsProc.requestedFile = activeFile
+    nsProc.requestedName = currentContext
     nsProc.running = true
   }
 
@@ -118,22 +127,63 @@ Item {
     refreshKind()
   }
 
-  // Writes current-context into the kubeconfig, which every shell the user
-  // opens afterwards will inherit. That is the point of the widget, but it is
-  // also why it only ever happens on an explicit click.
-  function switchTo(name) {
-    if (!name || switching !== "" || name === currentContext) return
-    switching = name
+  function switchTo(entry) {
+    if (!entry || !entry.file || !entry.name || switching !== "") return
+    if (entry.file === activeFile && entry.name === currentContext) return
     lastError = ""
-    switchProc.target = name
+    // Already current-context in that file: bind the widget without writing.
+    if (entry.currentInFile && entry.file !== activeFile) {
+      activeFile = entry.file
+      applyCurrentFlags()
+      if (detailed) {
+        probeAll()
+        refreshOverview()
+        refreshNamespaces()
+        refreshKind()
+      }
+      switched(entry.name, true, "bound")
+      return
+    }
+    switching = Model.rowKey(entry)
+    switchProc.file = entry.file
+    switchProc.target = entry.name
     switchProc.running = true
+  }
+
+  // Name in the bound file, a unique name across files, or `name@file`
+  // (`file` is the basename or a path) when two files share a context name.
+  // Exact names win so `admin@lifecycle` is a kubeadm name, not a split.
+  function switchToName(spec) {
+    var resolved = Model.resolveEntry(contexts, spec, activeFile)
+    if (resolved.entry) {
+      switchTo(resolved.entry)
+      return "ok"
+    }
+    return resolved.error || "unknown"
+  }
+
+  function markSwitched(file, name) {
+    activeFile = file
+    currentContext = name
+    var next = []
+    for (var i = 0; i < contexts.length; i++) {
+      var c = contexts[i]
+      next.push({
+        file: c.file, fileLabel: c.fileLabel, name: c.name, cluster: c.cluster,
+        namespace: c.namespace, server: c.server, inDefaultFile: c.inDefaultFile,
+        currentInFile: c.file === file ? c.name === name : c.currentInFile,
+        current: c.file === file && c.name === name
+      })
+    }
+    contexts = next
   }
 
   function setNamespace(name) {
     if (!name || settingNamespace !== "" || name === currentNamespace) return
-    if (!Model.validNamespace(name)) return
+    if (!Model.validNamespace(name) || !activeFile) return
     settingNamespace = name
     lastError = ""
+    nsSetProc.file = activeFile
     nsSetProc.target = name
     nsSetProc.running = true
   }
@@ -156,20 +206,62 @@ Item {
   function markCurrentKind(state) {
     var next = {}
     for (var k in kindStates) next[k] = kindStates[k]
-    next[currentContext] = state
+    next[currentKey] = state
     kindStates = next
+  }
+
+  function applyCurrentFlags() {
+    var cur = ""
+    var i
+    for (i = 0; i < contexts.length; i++) {
+      if (contexts[i].file === activeFile && contexts[i].currentInFile) {
+        cur = contexts[i].name
+        break
+      }
+    }
+    currentContext = cur
+    var next = []
+    for (i = 0; i < contexts.length; i++) {
+      var c = contexts[i]
+      next.push({
+        file: c.file, fileLabel: c.fileLabel, name: c.name, cluster: c.cluster,
+        namespace: c.namespace, server: c.server, inDefaultFile: c.inDefaultFile,
+        currentInFile: c.currentInFile,
+        current: c.file === activeFile && c.name === cur
+      })
+    }
+    contexts = next
   }
 
   function applyContexts(raw) {
     var parsed = Model.parseContexts(raw)
     kubectlMissing = parsed.missing
-    currentContext = parsed.current
-    contexts = parsed.contexts
+    defaultFile = parsed.defaultFile || ""
+    var still = false
+    var i
+    if (activeFile) {
+      for (i = 0; i < parsed.contexts.length; i++)
+        if (parsed.contexts[i].file === activeFile) { still = true; break }
+    }
+    if (!still) activeFile = parsed.defaultFile || ""
+    var cur = (parsed.currentByFile && parsed.currentByFile[activeFile]) || ""
+    currentContext = cur
+    var next = []
+    for (i = 0; i < parsed.contexts.length; i++) {
+      var c = parsed.contexts[i]
+      next.push({
+        file: c.file, fileLabel: c.fileLabel, name: c.name, cluster: c.cluster,
+        namespace: c.namespace, server: c.server, inDefaultFile: c.inDefaultFile,
+        currentInFile: c.currentInFile,
+        current: c.file === activeFile && c.name === cur
+      })
+    }
+    contexts = next
   }
 
   function applyNamespaces(raw) {
     var parsed = Model.parseNamespaces(raw)
-    if (namespacesFor !== currentContext) {
+    if (namespacesFor !== currentKey) {
       namespacesReady = false
       namespaces = []
       return
@@ -179,17 +271,21 @@ Item {
       ? Model.sortNamespaces(parsed.names, currentNamespace) : []
   }
 
-  // ── Processes ────────────────────────────────────────────────────────────
-
   Process {
     id: contextsProc
     command: ["bash", "-lc", Model.contextsScript()]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyContexts(text) }
+    onExited: {
+      if (root.contextsQueued) {
+        root.contextsQueued = false
+        Qt.callLater(function () { root.refreshContexts() })
+      }
+    }
   }
 
   Process {
     id: probeProc
-    command: ["bash", "-lc", Model.probeScript(root.contexts.map(function (c) { return c.name }))]
+    command: ["bash", "-lc", Model.probeScript(root.contexts)]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.probes = Model.parseProbes(text)
@@ -198,13 +294,14 @@ Item {
 
   Process {
     id: overviewProc
-    property string requested: ""
-    command: ["bash", "-lc", Model.overviewScript(requested)]
+    property string requestedFile: ""
+    property string requestedName: ""
+    command: ["bash", "-lc", Model.overviewScript(requestedName, requestedFile)]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var req = overviewProc.requested
-        if (req !== root.currentContext) {
+        var req = Model.rowKey({ file: overviewProc.requestedFile, name: overviewProc.requestedName })
+        if (req !== root.currentKey) {
           Qt.callLater(function () { root.refreshOverview() })
           return
         }
@@ -216,13 +313,14 @@ Item {
 
   Process {
     id: nsProc
-    property string requested: ""
-    command: ["bash", "-lc", Model.namespacesScript(requested)]
+    property string requestedFile: ""
+    property string requestedName: ""
+    command: ["bash", "-lc", Model.namespacesScript(requestedName, requestedFile)]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var req = nsProc.requested
-        if (req !== root.currentContext) {
+        var req = Model.rowKey({ file: nsProc.requestedFile, name: nsProc.requestedName })
+        if (req !== root.currentKey) {
           Qt.callLater(function () { root.refreshNamespaces() })
           return
         }
@@ -241,24 +339,24 @@ Item {
     }
   }
 
-  // No shell here on purpose: kubectl's own exit code decides, and a pipeline
-  // would hand back the exit code of whatever came last instead.
   Process {
     id: switchProc
+    property string file: ""
     property string target: ""
-    command: ["kubectl", "config", "use-context", target]
+    command: ["kubectl", "--kubeconfig=" + file, "config", "use-context", target]
     stderr: StdioCollector { waitForEnd: true }
     onExited: function (code) {
       var name = target
+      var fileUsed = file
       root.switching = ""
       if (code === 0) {
+        root.markSwitched(fileUsed, name)
         root.overview = ({})
         root.overviewFor = ""
         root.namespaces = []
         root.namespacesReady = false
         root.namespacesFor = ""
         root.refreshContexts()
-        // Picker switches with the panel closed; that must not start a probe.
         if (root.detailed) {
           root.refreshOverview()
           root.refreshNamespaces()
@@ -273,8 +371,9 @@ Item {
 
   Process {
     id: nsSetProc
+    property string file: ""
     property string target: ""
-    command: ["kubectl", "config", "set-context", "--current", "--namespace=" + target]
+    command: ["kubectl", "--kubeconfig=" + file, "config", "set-context", "--current", "--namespace=" + target]
     stderr: StdioCollector { waitForEnd: true }
     onExited: function (code) {
       var name = target
@@ -308,7 +407,7 @@ Item {
           root.namespacesFor = ""
           var next = {}
           for (var k in root.probes) next[k] = root.probes[k]
-          next[root.currentContext] = { reachable: false, ms: 0, version: "" }
+          next[root.currentKey] = { reachable: false, ms: 0, version: "" }
           root.probes = next
         } else {
           kindSettle.restart()
@@ -323,7 +422,6 @@ Item {
     }
   }
 
-  // Kubelet needs a moment after docker start before /version answers.
   Timer {
     id: kindSettle
     interval: 8000
@@ -336,9 +434,6 @@ Item {
     }
   }
 
-  // ── Cadence ──────────────────────────────────────────────────────────────
-  // Reading the kubeconfig costs nothing, so the bar label stays right even
-  // when the context is changed from a terminal.
   Timer {
     interval: root.contextIntervalSec * 1000
     running: true
@@ -347,7 +442,6 @@ Item {
     onTriggered: root.refreshContexts()
   }
 
-  // Anything that leaves the machine only runs while the panel is open.
   Timer {
     interval: root.probeIntervalSec * 1000
     running: root.detailed
@@ -367,7 +461,7 @@ Item {
     refreshNamespaces()
     refreshKind()
   }
-  onCurrentContextChanged: {
+  onCurrentKeyChanged: {
     overview = ({})
     overviewFor = ""
     namespaces = []

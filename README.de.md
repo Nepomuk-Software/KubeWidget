@@ -15,8 +15,11 @@ aktuellen Namespace und gibt einen kurzen Überblick über den gewählten Cluste
   neue Probe zu starten.
 - **Picker** — Rechtsklick auf das Icon wechselt den Context. Das ist ein
   lokaler Write; kein API-Server wird kontaktiert.
-- **Contexts** — jeder Context der kubeconfig mit API-Server, Namespace und
-  Erreichbarkeit. Ein Klick wechselt.
+- **Contexts** — jede Kubeconfig-Datei direkt in `~/.kube` (nicht `cache/`),
+  gruppiert nach Datei. Zwei Files mit Context `default` bleiben zwei Zeilen.
+  Wechsel in `~/.kube/config` erben neue Shells. Wechsel in einer anderen Datei
+  bindet **dieses Widget** (`--kubeconfig`); neue Terminals bleiben auf der
+  Default-Datei.
 - **Cluster** — bereite Nodes, Rollen, laufende Pods, Namespaces, Server- und
   Kubelet-Version, dazu CPU und Speicher im Mittel, sofern ein Metrics-Server
   antwortet. Klick auf den Namespace wählt einen anderen; das ist
@@ -71,18 +74,25 @@ gelassen hast. Dasselbe gilt für die kubeconfig-Writes.
 
 ## Was es schreibt
 
-Drei Dinge, alle nur auf ausdrücklichen Klick:
+Drei Dinge, alle nur auf ausdrücklichen Klick, immer gegen die Datei der Zeile:
 
-- `kubectl config use-context <name>` — setzt `current-context`
-- `kubectl config set-context --current --namespace=<name>` — setzt den
-  Namespace des aktuellen Contexts
+- `kubectl --kubeconfig=<file> config use-context <name>` — setzt
+  `current-context` in dieser Datei
+- `kubectl --kubeconfig=<file> config set-context --current --namespace=<name>`
+  — setzt den Namespace des aktuellen Contexts in dieser Datei
 - `docker start` / `docker stop` der Kind-Node-Container mit Label
   `io.x-k8s.kind.cluster=<name>` (und `cloud-provider-kind-<name>`, falls
   vorhanden). Kind hat kein start/stop; das ist das lokale Äquivalent. Nur
   für `kind-*`-Contexts, deren Container wirklich da sind.
 
-Jede Shell, die du danach öffnest, erbt die kubeconfig-Writes. Docker
-start/stop passiert nie von allein. Alles andere ist lesend. Der
+Änderungen an der Default-Kubeconfig (`~/.kube/config` bzw. dem ersten
+`KUBECONFIG`-Eintrag) erben neue Shells. Änderungen an einer anderen Datei
+bleiben dort; das Widget hält `--kubeconfig` darauf, bis du einen Context in
+einer anderen Datei wählst. Neue Terminals bleiben auf kubectl-Default. Das
+Widget kopiert keine Cluster nach `~/.kube/config`, exportiert kein
+`KUBECONFIG` und ersetzt `~/.kube/config` nicht durch einen Symlink.
+
+Docker start/stop passiert nie von allein. Alles andere ist lesend. Der
 Rechtsklick-Picker wechselt nur den Context und spricht weder Cluster noch
 Docker an.
 
@@ -123,8 +133,11 @@ omarchy-shell io.github.nepomuk-software.kubecontext <method> [context]
 |---|---|
 | `open` `close` `toggle` | das Popup |
 | `current` | Name des aktiven Contexts |
+| `kubeconfig` | die Kubeconfig-Datei, an die das Widget gebunden ist |
+| `rows` | jede Zeile als `name<TAB>file`, `*` an der gebundenen |
 | `namespace` | Namespace des aktuellen Contexts |
-| `use <context>` | zu einem Context wechseln |
+| `use <context>` | Context in der gebundenen Datei, oder der eindeutige Name; `name@file` bei gleichem Namen in zwei Dateien |
+| `useIn <file> <context>` | dasselbe, Datei als eigenes Argument |
 | `useNamespace <name>` | Namespace des aktuellen Contexts setzen |
 | `kindStart` `kindStop` | Kind-Node-Container des aktuellen `kind-*`-Contexts starten oder stoppen |
 | `refresh` | kubeconfig neu lesen; Probe und Überblick nur bei offenem Panel |

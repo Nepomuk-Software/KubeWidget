@@ -64,6 +64,93 @@ function shellQuote(value) {
   return "'" + String(value === undefined || value === null ? "" : value).replace(/'/g, "'\\''") + "'"
 }
 
+function kubeFlag(file) {
+  if (!file) return ""
+  return "--kubeconfig=" + shellQuote(file) + " "
+}
+
+// A context is identified by the file it lives in and its name: two files
+// both called "default" are two rows, not one.
+function rowKey(entry) {
+  if (!entry) return ""
+  return String(entry.file || "") + "\t" + String(entry.name || "")
+}
+
+function fileLabel(path) {
+  var s = String(path || "")
+  var i = s.lastIndexOf("/")
+  return i >= 0 ? s.substring(i + 1) : s
+}
+
+function groupContexts(contexts) {
+  var groups = []
+  var index = {}
+  for (var i = 0; i < (contexts || []).length; i++) {
+    var c = contexts[i]
+    var f = c.file || ""
+    if (index[f] === undefined) {
+      index[f] = groups.length
+      groups.push({
+        file: f,
+        fileLabel: c.fileLabel || fileLabel(f),
+        isDefault: !!c.inDefaultFile,
+        entries: []
+      })
+    }
+    groups[index[f]].entries.push(c)
+  }
+  return groups
+}
+
+function fileHintMatches(entry, hint) {
+  if (!entry || !hint) return false
+  if (entry.file === hint || entry.fileLabel === hint) return true
+  var s = String(entry.file || "")
+  return s.length > hint.length
+    && s.substring(s.length - hint.length) === hint
+    && s.charAt(s.length - hint.length - 1) === "/"
+}
+
+// IPC `use` takes a name. Names like `admin@lifecycle` are real, so an exact
+// name match wins. `name@file` is only the disambiguator when that exact name
+// is missing (last `@`, so `user@cluster@file.yaml` still works).
+function resolveEntry(contexts, spec, activeFile) {
+  if (!spec) return { error: "unknown" }
+  var list = contexts || []
+  var i, c, n, match
+  if (activeFile) {
+    for (i = 0; i < list.length; i++) {
+      c = list[i]
+      if (c.name === spec && c.file === activeFile) return { entry: c }
+    }
+  }
+  match = null
+  n = 0
+  for (i = 0; i < list.length; i++) {
+    if (list[i].name === spec) { match = list[i]; n++ }
+  }
+  if (n === 1) return { entry: match }
+  if (n > 1) return { error: "ambiguous" }
+
+  var at = spec.lastIndexOf("@")
+  if (at <= 0) return { error: "unknown" }
+  var name = spec.substring(0, at)
+  var hint = spec.substring(at + 1)
+  if (!name || !hint) return { error: "unknown" }
+  match = null
+  n = 0
+  for (i = 0; i < list.length; i++) {
+    c = list[i]
+    if (c.name !== name) continue
+    if (!fileHintMatches(c, hint)) continue
+    match = c
+    n++
+  }
+  if (n === 1) return { entry: match }
+  if (n > 1) return { error: "ambiguous" }
+  return { error: "unknown" }
+}
+
 // ── Commands ───────────────────────────────────────────────────────────────
 
 // Contexts, their clusters and the current selection. No network at all, so
@@ -71,35 +158,65 @@ function shellQuote(value) {
 function contextsScript() {
   return capped([
     "command -v kubectl >/dev/null 2>&1 || { printf 'nokubectl=1\\n'; exit 0; };",
-    "printf 'current=%s\\n' \"$(kubectl config current-context 2>/dev/null)\";",
-    "kubectl config view -o jsonpath='{range .contexts[*]}{.name}|{.context.cluster}|{.context.namespace}{\"\\n\"}{end}'",
-    "  2>/dev/null | sed '/^$/d; s/^/ctx=/';",
-    "kubectl config view -o jsonpath='{range .clusters[*]}{.name}|{.cluster.server}{\"\\n\"}{end}'",
-    "  2>/dev/null | sed '/^$/d; s/^/cluster=/'"
+    "kubehome=$HOME/.kube;",
+    "if [ -n \"$KUBECONFIG\" ]; then def=${KUBECONFIG%%:*}; else def=$kubehome/config; fi;",
+    "def=$(readlink -f \"$def\" 2>/dev/null || printf '%s' \"$def\");",
+    "printf 'defaultfile=%s\\n' \"$def\";",
+    "files=;",
+    "add() {",
+    "  [ -n \"$1\" ] && [ -f \"$1\" ] && [ -s \"$1\" ] && [ -r \"$1\" ] || return;",
+    "  b=$(basename \"$1\");",
+    "  case \"$b\" in cache|http|discovery|*.lock|*.tmp|*.swp) return;; esac;",
+    "  p=$(readlink -f \"$1\" 2>/dev/null || printf '%s' \"$1\");",
+    "  case \":$files:\" in *:\"$p\":*) return;; esac;",
+    "  files=$files$p:;",
+    "};",
+    "if [ -n \"$KUBECONFIG\" ]; then IFS=:; for p in $KUBECONFIG; do add \"$p\"; done; unset IFS; fi;",
+    "add \"$kubehome/config\";",
+    "for f in \"$kubehome\"/*; do",
+    "  case \"$f\" in */cache|*/cache/*) continue;; esac;",
+    "  add \"$f\";",
+    "done;",
+    "IFS=:; for f in $files; do",
+    "  [ -n \"$f\" ] || continue;",
+    "  n=$(kubectl --kubeconfig=\"$f\" config view -o jsonpath='{.contexts[0].name}' 2>/dev/null) || continue;",
+    "  [ -n \"$n\" ] || continue;",
+    "  printf 'file=%s\\n' \"$f\";",
+    "  printf 'current=%s\\n' \"$(kubectl --kubeconfig=\"$f\" config current-context 2>/dev/null)\";",
+    "  kubectl --kubeconfig=\"$f\" config view -o jsonpath='{range .contexts[*]}{.name}|{.context.cluster}|{.context.namespace}{\"\\n\"}{end}'",
+    "    2>/dev/null | sed '/^$/d; s/^/ctx=/';",
+    "  kubectl --kubeconfig=\"$f\" config view -o jsonpath='{range .clusters[*]}{.name}|{.cluster.server}{\"\\n\"}{end}'",
+    "    2>/dev/null | sed '/^$/d; s/^/cluster=/';",
+    "done;",
+    "unset IFS"
   ].join(" "))
 }
 
 // Reachability for every context at once. Serially this would take as long as
 // the sum of the failures; in parallel it takes as long as the slowest one,
 // and the timeouts bound that.
-function probeScript(names) {
-  if (!names || names.length === 0) return "true"
-  var quoted = []
-  for (var i = 0; i < names.length; i++) quoted.push(shellQuote(names[i]))
+function probeScript(entries) {
+  if (!entries || entries.length === 0) return "true"
+  var jobs = []
+  for (var i = 0; i < entries.length; i++) {
+    if (!entries[i] || !entries[i].name) continue
+    jobs.push("probe " + shellQuote(entries[i].file) + " " + shellQuote(entries[i].name) + " &")
+  }
+  if (jobs.length === 0) return "true"
   return capped([
     "probe() {",
     "  s=$(date +%s%N);",
-    "  out=$(timeout " + PROBE_HARD + " kubectl --context \"$1\" --request-timeout=" + PROBE_TIMEOUT + "s get --raw /version 2>/dev/null | head -c " + RAW_CAPTURE + ");",
+    "  out=$(timeout " + PROBE_HARD + " kubectl --kubeconfig=\"$1\" --context \"$2\" --request-timeout=" + PROBE_TIMEOUT + "s get --raw /version 2>/dev/null | head -c " + RAW_CAPTURE + ");",
     "  e=$(date +%s%N);",
     "  ms=$(( (e-s)/1000000 ));",
     "  if printf '%s' \"$out\" | grep -q gitVersion; then",
     "    v=$(printf '%s' \"$out\" | sed -n 's/.*\"gitVersion\": *\"\\([^\"]*\\)\".*/\\1/p' | head -1);",
-    "    printf 'up=%s|1|%s|%s\\n' \"$1\" \"$ms\" \"$v\";",
+    "    printf 'up=%s\\t%s\\t1\\t%s\\t%s\\n' \"$1\" \"$2\" \"$ms\" \"$v\";",
     "  else",
-    "    printf 'up=%s|0|%s|\\n' \"$1\" \"$ms\";",
+    "    printf 'up=%s\\t%s\\t0\\t%s\\t\\n' \"$1\" \"$2\" \"$ms\";",
     "  fi;",
     "};",
-    "for n in " + quoted.join(" ") + "; do probe \"$n\" & done;",
+    jobs.join(" "),
     "wait"
   ].join(" "))
 }
@@ -107,11 +224,12 @@ function probeScript(names) {
 // The overview asks whether anyone is home before counting anything. Otherwise
 // every count comes back zero, and "not measured" would render as "an empty
 // cluster" — a different claim entirely.
-function overviewScript(context) {
+function overviewScript(context, file) {
   var c = shellQuote(context)
+  var kf = kubeFlag(file)
   return capped([
     "ctx=" + c + ";",
-    "k() { timeout " + HARD_TIMEOUT + " kubectl --context \"$ctx\" --request-timeout=" + NET_TIMEOUT + "s \"$@\" 2>/dev/null; };",
+    "k() { timeout " + HARD_TIMEOUT + " kubectl " + kf + "--context \"$ctx\" --request-timeout=" + NET_TIMEOUT + "s \"$@\" 2>/dev/null; };",
     "ver=$(k get --raw /version | head -c " + RAW_CAPTURE + ");",
     "printf '%s' \"$ver\" | grep -q gitVersion || { printf 'reachable=0\\n'; exit 0; };",
     "printf 'reachable=1\\n';",
@@ -138,11 +256,12 @@ function overviewScript(context) {
 // Namespaces of one context. The API has to answer, so this is the same
 // bound as the overview and is only asked for the current context while the
 // panel is open — never for every row, never from the picker.
-function namespacesScript(context) {
+function namespacesScript(context, file) {
   var c = shellQuote(context)
+  var kf = kubeFlag(file)
   return capped([
     "ctx=" + c + ";",
-    "k() { timeout " + HARD_TIMEOUT + " kubectl --context \"$ctx\" --request-timeout=" + NET_TIMEOUT + "s \"$@\" 2>/dev/null; };",
+    "k() { timeout " + HARD_TIMEOUT + " kubectl " + kf + "--context \"$ctx\" --request-timeout=" + NET_TIMEOUT + "s \"$@\" 2>/dev/null; };",
     "ver=$(k get --raw /version | head -c " + RAW_CAPTURE + ");",
     "printf '%s' \"$ver\" | grep -q gitVersion || { printf 'reachable=0\\n'; exit 0; };",
     "printf 'reachable=1\\n';",
@@ -166,24 +285,68 @@ function parseKeyValues(raw) {
 function parseContexts(raw) {
   var text = clamp(raw)
   var lines = text.split("\n")
-  var current = "", servers = {}, contexts = []
+  var defaultFile = "", file = "", current = "", contexts = []
+  var currentByFile = {}
+  function flushCurrent() {
+    if (file) currentByFile[file] = current
+  }
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i]
-    if (line.indexOf("current=") === 0) {
+    if (line.indexOf("defaultfile=") === 0) {
+      defaultFile = line.substring(12)
+    } else if (line.indexOf("file=") === 0) {
+      flushCurrent()
+      file = line.substring(5)
+      current = ""
+    } else if (line.indexOf("current=") === 0) {
       current = line.substring(8)
-    } else if (line.indexOf("cluster=") === 0) {
-      var cf = line.substring(8).split("|")
-      if (cf[0]) servers[cf[0]] = cf[1] || ""
     } else if (line.indexOf("ctx=") === 0) {
       var f = line.substring(4).split("|")
-      if (f[0]) contexts.push({ name: f[0], cluster: f[1] || "", namespace: f[2] || "default" })
+      if (f[0] && file)
+        contexts.push({
+          file: file,
+          fileLabel: fileLabel(file),
+          name: f[0],
+          cluster: f[1] || "",
+          namespace: f[2] || "default",
+          server: "",
+          inDefaultFile: file === defaultFile,
+          currentInFile: false,
+          current: false
+        })
     }
   }
-  for (var j = 0; j < contexts.length; j++) {
-    contexts[j].server = servers[contexts[j].cluster] || ""
-    contexts[j].current = contexts[j].name === current
+  flushCurrent()
+  for (var j = 0; j < contexts.length; j++)
+    contexts[j].currentInFile = contexts[j].name === (currentByFile[contexts[j].file] || "")
+  return {
+    defaultFile: defaultFile,
+    currentByFile: currentByFile,
+    contexts: attachServers(text, defaultFile, contexts),
+    missing: text.indexOf("nokubectl=1") >= 0
   }
-  return { current: current, contexts: contexts, missing: text.indexOf("nokubectl=1") >= 0 }
+}
+
+function attachServers(text, defaultFile, contexts) {
+  var lines = text.split("\n")
+  var file = "", servers = {}, byFile = {}
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf("file=") === 0) {
+      if (file) byFile[file] = servers
+      file = lines[i].substring(5)
+      servers = {}
+    } else if (lines[i].indexOf("cluster=") === 0) {
+      var cf = lines[i].substring(8).split("|")
+      if (cf[0]) servers[cf[0]] = cf[1] || ""
+    }
+  }
+  if (file) byFile[file] = servers
+  for (var j = 0; j < contexts.length; j++) {
+    var map = byFile[contexts[j].file] || {}
+    contexts[j].server = map[contexts[j].cluster] || ""
+    contexts[j].inDefaultFile = contexts[j].file === defaultFile
+  }
+  return contexts
 }
 
 function parseProbes(raw) {
@@ -191,9 +354,9 @@ function parseProbes(raw) {
   var lines = clamp(raw).split("\n")
   for (var i = 0; i < lines.length; i++) {
     if (lines[i].indexOf("up=") !== 0) continue
-    var f = lines[i].substring(3).split("|")
-    if (!f[0]) continue
-    out[f[0]] = { reachable: f[1] === "1", ms: Number(f[2] || 0), version: f[3] || "" }
+    var f = lines[i].substring(3).split("\t")
+    if (f.length < 3 || !f[1]) continue
+    out[f[0] + "\t" + f[1]] = { reachable: f[2] === "1", ms: Number(f[3] || 0), version: f[4] || "" }
   }
   return out
 }
@@ -224,6 +387,7 @@ function kindStatusScript(entries) {
     var cluster = kindClusterName(entries[i])
     if (!cluster) continue
     jobs.push({
+      file: shellQuote(entries[i].file || ""),
       ctx: shellQuote(entries[i].name || entries[i]),
       cluster: shellQuote(cluster),
       node: shellQuote(cluster + "-control-plane")
@@ -232,26 +396,26 @@ function kindStatusScript(entries) {
   if (jobs.length === 0) return "true"
   var loop = []
   for (var j = 0; j < jobs.length; j++)
-    loop.push("check " + jobs[j].ctx + " " + jobs[j].node + " " + jobs[j].cluster + " &")
+    loop.push("check " + jobs[j].file + " " + jobs[j].ctx + " " + jobs[j].node + " " + jobs[j].cluster + " &")
   return capped([
     "check() {",
-    "  ctx=$1; node=$2; cl=$3;",
+    "  file=$1; ctx=$2; node=$3; cl=$4;",
     "  if command -v docker >/dev/null 2>&1; then",
     "    [ -n \"$(timeout 2 docker ps -q --filter label=io.x-k8s.kind.cluster=\"$cl\")\" ]",
-    "      && { printf 'kind=%s|running\\n' \"$ctx\"; return; };",
+    "      && { printf 'kind=%s\\t%s\\trunning\\n' \"$file\" \"$ctx\"; return; };",
     "    [ -n \"$(timeout 2 docker ps -aq --filter label=io.x-k8s.kind.cluster=\"$cl\")\" ]",
-    "      && { printf 'kind=%s|stopped\\n' \"$ctx\"; return; };",
+    "      && { printf 'kind=%s\\t%s\\tstopped\\n' \"$file\" \"$ctx\"; return; };",
     "    st=$(timeout 2 docker inspect -f '{{.State.Running}}' \"$node\" 2>/dev/null);",
-    "    [ \"$st\" = true ] && { printf 'kind=%s|running\\n' \"$ctx\"; return; };",
-    "    [ \"$st\" = false ] && { printf 'kind=%s|stopped\\n' \"$ctx\"; return; };",
+    "    [ \"$st\" = true ] && { printf 'kind=%s\\t%s\\trunning\\n' \"$file\" \"$ctx\"; return; };",
+    "    [ \"$st\" = false ] && { printf 'kind=%s\\t%s\\tstopped\\n' \"$file\" \"$ctx\"; return; };",
     "  fi;",
     "  if command -v kind >/dev/null 2>&1; then",
     "    timeout 2 kind get nodes --name \"$cl\" 2>/dev/null | grep -q .",
-    "      && { printf 'kind=%s|running\\n' \"$ctx\"; return; };",
+    "      && { printf 'kind=%s\\t%s\\trunning\\n' \"$file\" \"$ctx\"; return; };",
     "    timeout 2 kind get clusters 2>/dev/null | grep -qx \"$cl\"",
-    "      && { printf 'kind=%s|stopped\\n' \"$ctx\"; return; };",
+    "      && { printf 'kind=%s\\t%s\\tstopped\\n' \"$file\" \"$ctx\"; return; };",
     "  fi;",
-    "  printf 'kind=%s|unknown\\n' \"$ctx\";",
+    "  printf 'kind=%s\\t%s\\tunknown\\n' \"$file\" \"$ctx\";",
     "};",
     loop.join(" "),
     "wait"
@@ -291,8 +455,8 @@ function parseKindStatus(raw) {
   var lines = clamp(raw).split("\n")
   for (var i = 0; i < lines.length; i++) {
     if (lines[i].indexOf("kind=") !== 0) continue
-    var f = lines[i].substring(5).split("|")
-    if (f[0] && f[1]) out[f[0]] = f[1]
+    var f = lines[i].substring(5).split("\t")
+    if (f.length >= 3 && f[1]) out[f[0] + "\t" + f[1]] = f[2]
   }
   return out
 }

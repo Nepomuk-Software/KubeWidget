@@ -10,9 +10,9 @@ import "Model.js" as Model
 //
 //   left = panel · right = context picker · middle = refresh
 //
-// Everything here is read-only except two actions, both explicit clicks:
-// switching current-context, and setting the current namespace. The picker
-// does the first without talking to any cluster.
+// Writes are explicit clicks: use-context / set-namespace on the row's file,
+// and Kind start/stop. Extra files bind this widget only (--kubeconfig);
+// they are not exported into new shells. The picker never talks to a cluster.
 Panel {
   id: root
   moduleName: "io.github.nepomuk-software.kubecontext"
@@ -38,11 +38,13 @@ Panel {
   property bool quickCursorActive: false
 
   readonly property bool quickAvailable: !kube.kubectlMissing && kube.contexts.length > 0
+  readonly property var contextGroups: Model.groupContexts(kube.contexts)
 
   readonly property string barTooltip: {
     if (kube.kubectlMissing) return "kubectl is not installed"
     if (!kube.currentContext) return "No Kubernetes context selected"
     var lines = ["Context " + Model.plain(kube.currentContext)]
+    if (kube.extraFile) lines.push("File " + Model.plain(kube.activeFileLabel) + " (this widget only)")
     var e = kube.currentEntry
     if (e && e.namespace) lines.push("Namespace " + Model.plain(e.namespace))
     if (e && e.server) lines.push(Model.plain(Model.shortServer(e.server)))
@@ -91,7 +93,7 @@ Panel {
   function activateCursor() {
     if (!cursorActive || kube.contexts.length === 0) return
     var c = kube.contexts[contextIndex]
-    if (c && !c.current) kube.switchTo(c.name)
+    if (c && !c.current) kube.switchTo(c)
   }
 
   function moveNsCursor(dy) {
@@ -114,7 +116,7 @@ Panel {
 
   Connections {
     target: kube
-    function onCurrentContextChanged() {
+    function onCurrentKeyChanged() {
       root.nsOpen = false
       root.nsCursorActive = false
     }
@@ -133,10 +135,29 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { kube.refreshAll(); return "ok" }
     function current(): string { return kube.currentContext || "none" }
+    function kubeconfig(): string { return kube.activeFile || "" }
     function namespace(): string { return kube.currentNamespace }
     function use(context: string): string {
-      kube.switchTo(context)
-      return kube.switching === context ? "switching" : "unchanged"
+      var before = kube.currentKey
+      var r = kube.switchToName(context)
+      if (kube.switching !== "") return "switching"
+      if (kube.currentKey !== before) return "bound"
+      return r === "ok" ? "unchanged" : r
+    }
+    function useIn(file: string, context: string): string {
+      var before = kube.currentKey
+      var r = kube.switchToName(context + "@" + file)
+      if (kube.switching !== "") return "switching"
+      if (kube.currentKey !== before) return "bound"
+      return r === "ok" ? "unchanged" : r
+    }
+    function rows(): string {
+      var lines = []
+      for (var i = 0; i < kube.contexts.length; i++) {
+        var c = kube.contexts[i]
+        lines.push((c.current ? "*" : " ") + " " + c.name + "\t" + (c.file || ""))
+      }
+      return lines.join("\n") || "none"
     }
     function useNamespace(name: string): string {
       kube.setNamespace(name)
@@ -153,12 +174,13 @@ Panel {
     function status(): string {
       if (kube.kubectlMissing) return "no kubectl"
       if (!kube.currentContext) return "no context"
-      var p = kube.probes[kube.currentContext]
-      if (!p) return kube.currentContext + " unprobed"
+      var p = kube.currentProbe
+      var tag = kube.currentContext + (kube.extraFile ? "@" + kube.activeFileLabel : "")
+      if (!p) return tag + " unprobed"
       if (!p.reachable)
-        return kube.currentContext + (kube.currentKind === "stopped" ? " kind-stopped" : " unreachable")
+        return tag + (kube.currentKind === "stopped" ? " kind-stopped" : " unreachable")
       var o = kube.overview
-      var line = kube.currentContext + " reachable " + p.version
+      var line = tag + " reachable " + p.version
               + " ns=" + kube.currentNamespace
       if (kube.overviewReady)
         line += " nodes=" + (o.nodesReady || "0") + "/" + (o.nodesTotal || "0")
@@ -267,7 +289,9 @@ Panel {
               width: parent.width
               title: "Kubernetes"
               meta: kube.kubectlMissing ? "kubectl not installed"
-                    : kube.currentContext ? Model.plain(kube.currentContext)
+                    : kube.currentContext
+                      ? (Model.plain(kube.currentContext)
+                         + (kube.extraFile ? "  ·  " + Model.plain(kube.activeFileLabel) : ""))
                     : "no context selected"
               detail: kube.overviewReady ? Model.plain(kube.overview.serverVersion || "") : ""
               foreground: root.foreground
@@ -282,6 +306,18 @@ Panel {
                 }
               }
             }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: kube.extraFile
+            width: parent.width
+            text: Model.plain(kube.activeFileLabel) + " — this widget only; new shells still use "
+                  + Model.plain(Model.fileLabel(kube.defaultFile) || "config")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           Text {
@@ -476,15 +512,37 @@ Panel {
             }
 
             Repeater {
-              model: kube.contexts
+              model: root.contextGroups
 
-              ContextRow {
+              Column {
+                required property var modelData
                 width: column.width
-                hasCursor: root.cursorActive && root.contextIndex === index
-                onActivated: kube.switchTo(modelData.name)
-                onEntered: {
-                  root.cursorActive = true
-                  root.contextIndex = index
+                spacing: Style.space(2)
+
+                PanelSectionHeader {
+                  text: Model.plain(modelData.fileLabel || "config")
+                        + (modelData.isDefault ? "" : "  ·  widget only")
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Repeater {
+                  model: parent.modelData.entries
+
+                  ContextRow {
+                    width: column.width
+                    hasCursor: root.cursorActive && kube.contexts[root.contextIndex]
+                               && Model.rowKey(kube.contexts[root.contextIndex]) === Model.rowKey(modelData)
+                    onActivated: kube.switchTo(modelData)
+                    onEntered: {
+                      root.cursorActive = true
+                      for (var i = 0; i < kube.contexts.length; i++) {
+                        if (Model.rowKey(kube.contexts[i]) === Model.rowKey(modelData)) {
+                          root.contextIndex = i; break
+                        }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -537,7 +595,7 @@ Panel {
       onActivateRequested: {
         if (!root.quickCursorActive || kube.contexts.length === 0) return
         var c = kube.contexts[root.quickIndex]
-        if (c && !c.current) kube.switchTo(c.name)
+        if (c && !c.current) kube.switchTo(c)
         quickOwner.close()
       }
       onCloseRequested: quickOwner.close()
@@ -558,17 +616,27 @@ Panel {
           width: quickFlick.width
           spacing: Style.space(4)
 
-          PanelSectionHeader {
-            text: "CONTEXTS"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
-
           Repeater {
-            model: root.quickOpen ? kube.contexts : []
+            model: root.quickOpen ? root.contextGroups : []
 
-            QuickRow {
+            Column {
+              required property var modelData
               width: quickColumn.width
+              spacing: Style.space(2)
+
+              PanelSectionHeader {
+                text: Model.plain(modelData.fileLabel || "config")
+                      + (modelData.isDefault ? "" : "  ·  widget only")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: parent.modelData.entries
+                QuickRow {
+                  width: quickColumn.width
+                }
+              }
             }
           }
         }
@@ -658,10 +726,10 @@ Panel {
     required property int index
     property bool hasCursor: false
 
-    readonly property var probe: kube.probes[modelData.name] || null
-    readonly property string kind: kube.kindStates[modelData.name] || ""
+    readonly property var probe: kube.probes[Model.rowKey(modelData)] || null
+    readonly property string kind: kube.kindStates[Model.rowKey(modelData)] || ""
     readonly property bool isCurrent: modelData.current === true
-    readonly property bool isSwitching: kube.switching === modelData.name
+    readonly property bool isSwitching: kube.switching === Model.rowKey(modelData)
 
     signal activated()
     signal entered()
@@ -723,7 +791,7 @@ Panel {
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        text: row.modelData.name
+        text: Model.plain(row.modelData.name)
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -754,8 +822,9 @@ Panel {
     required property int index
 
     readonly property bool isCurrent: modelData.current === true
-    readonly property bool isSwitching: kube.switching === modelData.name
-    readonly property bool hasCursor: root.quickCursorActive && root.quickIndex === index
+    readonly property bool isSwitching: kube.switching === Model.rowKey(modelData)
+    readonly property bool hasCursor: root.quickCursorActive && kube.contexts[root.quickIndex]
+                                      && Model.rowKey(kube.contexts[root.quickIndex]) === Model.rowKey(modelData)
 
     implicitHeight: Style.spacing.popupRowHeight + Style.space(4)
     radius: Style.cornerRadius
@@ -767,12 +836,16 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       onClicked: {
-        if (!quickRow.isCurrent) kube.switchTo(quickRow.modelData.name)
+        if (!quickRow.isCurrent) kube.switchTo(quickRow.modelData)
         quickOwner.close()
       }
       onContainsMouseChanged: if (containsMouse) {
         root.quickCursorActive = true
-        root.quickIndex = quickRow.index
+        for (var i = 0; i < kube.contexts.length; i++) {
+          if (Model.rowKey(kube.contexts[i]) === Model.rowKey(quickRow.modelData)) {
+            root.quickIndex = i; break
+          }
+        }
       }
     }
 

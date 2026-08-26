@@ -14,8 +14,12 @@ namespace, and gives a short overview of the selected cluster.
   not running — without starting a new probe while the panel is closed.
 - **Picker** — right-click the icon to switch context. That write is local;
   no API server is contacted.
-- **Contexts** — every context in the kubeconfig with its API server, namespace
-  and reachability. Click one to switch.
+- **Contexts** — every kubeconfig file sitting directly in `~/.kube` (not
+  `cache/`), grouped by file. Two files that both have a context named
+  `default` are two rows.
+  Switching a context in `~/.kube/config` is what new shells inherit. Switching
+  in another file binds **this widget** to that file (`--kubeconfig`); new
+  terminals still use the default.
 - **Cluster** — nodes ready, roles, pods running, namespaces, server and kubelet
   versions, and average CPU and memory when a metrics server answers. Click the
   namespace to pick another; that is `kubectl config set-context --current
@@ -68,18 +72,25 @@ current namespace) stay as you left them too.
 
 ## What it writes
 
-Three things, all on an explicit click:
+Three things, all on an explicit click, always against the file of the row:
 
-- `kubectl config use-context <name>` — sets `current-context`
-- `kubectl config set-context --current --namespace=<name>` — sets the namespace
-  of the current context
+- `kubectl --kubeconfig=<file> config use-context <name>` — sets
+  `current-context` in that file
+- `kubectl --kubeconfig=<file> config set-context --current --namespace=<name>`
+  — sets the namespace of the current context in that file
 - `docker start` / `docker stop` of the Kind node containers labeled
   `io.x-k8s.kind.cluster=<name>` (and `cloud-provider-kind-<name>` if that
   sidecar exists). Kind has no start/stop CLI; this is the local equivalent.
   Only offered for `kind-*` contexts whose containers were actually found.
 
-Every shell you open afterwards inherits the kubeconfig writes. Docker
-start/stop never happens on its own. Everything else the widget does is
+Writes against the default kubeconfig (`~/.kube/config`, or the first
+`KUBECONFIG` entry) are what new shells inherit. Writes against another file
+stay in that file; the widget keeps `--kubeconfig` pointed there until you pick
+a context in a different file. New terminals still use kubectl's default. The
+widget never copies clusters into `~/.kube/config`, never exports `KUBECONFIG`,
+and never replaces `~/.kube/config` with a symlink.
+
+Docker start/stop never happens on its own. Everything else the widget does is
 read-only. The right-click picker only switches context, and never contacts a
 cluster or Docker.
 
@@ -120,8 +131,11 @@ omarchy-shell io.github.nepomuk-software.kubecontext <method> [context]
 |---|---|
 | `open` `close` `toggle` | the popup |
 | `current` | the active context name |
+| `kubeconfig` | the kubeconfig file this widget is bound to |
+| `rows` | every row as `name<TAB>file`, `*` on the bound one |
 | `namespace` | the current context's namespace |
-| `use <context>` | switch to a context |
+| `use <context>` | switch to a context in the bound file, or the unique name; `name@file` when two files share a name |
+| `useIn <file> <context>` | same, with the file as its own argument |
 | `useNamespace <name>` | set the current context's namespace |
 | `kindStart` `kindStop` | start or stop the Kind node containers for the current `kind-*` context |
 | `refresh` | re-read kubeconfig; probe and overview only while the panel is open |

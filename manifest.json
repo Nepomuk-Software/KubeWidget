@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.nepomuk-software.kubecontext",
   "name": "KubeContext",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Nepomuk Software",
   "license": "MIT",
-  "description": "Shows the active Kubernetes context in the bar, switches between contexts and namespaces, and gives a short overview of the selected cluster.",
+  "description": "Shows the active Kubernetes context in the bar, switches between contexts and namespaces across every kubeconfig in ~/.kube, and gives a short overview of the selected cluster.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "KubeContext",
-    "description": "Current kubectl context in the bar, right-click to switch, plus nodes, pods and namespace of the selected cluster.",
+    "description": "Current kubectl context in the bar, right-click to switch, extra kubeconfigs in ~/.kube grouped by file, plus nodes, pods and namespace of the selected cluster.",
     "category": "Developer Tools",
     "allowMultiple": false,
     "defaultSection": "right",
