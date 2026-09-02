@@ -3,12 +3,15 @@
 
 .pragma library
 
-// Reading a kubeconfig is a local file operation. Talking to a cluster is not,
-// and clusters fail in more ways than they succeed: a credential plugin that
-// errors, a private endpoint whose DNS does not resolve, an API server that
-// simply never answers. Every call that leaves the machine is wrapped twice —
+// Reading a kubeconfig is a local file parse (list_kubeconfigs.py), never
+// kubectl: an untrusted file's users.exec plugin must not run just because
+// it sits in ~/.kube. Talking to a cluster is the opposite, and clusters
+// fail in more ways than they succeed: a credential plugin that errors, a
+// private endpoint whose DNS does not resolve, an API server that simply
+// never answers. Every call that leaves the machine is wrapped twice —
 // kubectl's own --request-timeout and an outer timeout(1) — because a shell
-// that hosts the whole desktop cannot afford to wait on any of them.
+// that hosts the whole desktop cannot afford to wait on any of them. Those
+// calls are only made against the context this widget is bound to.
 var NET_TIMEOUT = 5      // seconds, passed to kubectl
 var HARD_TIMEOUT = 6     // seconds, outer cap
 var PROBE_TIMEOUT = 2    // seconds, reachability only
@@ -153,48 +156,8 @@ function resolveEntry(contexts, spec, activeFile) {
 
 // ── Commands ───────────────────────────────────────────────────────────────
 
-// Contexts, their clusters and the current selection. No network at all, so
-// this can run on a plain timer without costing anything.
-function contextsScript() {
-  return capped([
-    "command -v kubectl >/dev/null 2>&1 || { printf 'nokubectl=1\\n'; exit 0; };",
-    "kubehome=$HOME/.kube;",
-    "if [ -n \"$KUBECONFIG\" ]; then def=${KUBECONFIG%%:*}; else def=$kubehome/config; fi;",
-    "def=$(readlink -f \"$def\" 2>/dev/null || printf '%s' \"$def\");",
-    "printf 'defaultfile=%s\\n' \"$def\";",
-    "files=;",
-    "add() {",
-    "  [ -n \"$1\" ] && [ -f \"$1\" ] && [ -s \"$1\" ] && [ -r \"$1\" ] || return;",
-    "  b=$(basename \"$1\");",
-    "  case \"$b\" in cache|http|discovery|*.lock|*.tmp|*.swp) return;; esac;",
-    "  p=$(readlink -f \"$1\" 2>/dev/null || printf '%s' \"$1\");",
-    "  case \":$files:\" in *:\"$p\":*) return;; esac;",
-    "  files=$files$p:;",
-    "};",
-    "if [ -n \"$KUBECONFIG\" ]; then IFS=:; for p in $KUBECONFIG; do add \"$p\"; done; unset IFS; fi;",
-    "add \"$kubehome/config\";",
-    "for f in \"$kubehome\"/*; do",
-    "  case \"$f\" in */cache|*/cache/*) continue;; esac;",
-    "  add \"$f\";",
-    "done;",
-    "IFS=:; for f in $files; do",
-    "  [ -n \"$f\" ] || continue;",
-    "  n=$(kubectl --kubeconfig=\"$f\" config view -o jsonpath='{.contexts[0].name}' 2>/dev/null) || continue;",
-    "  [ -n \"$n\" ] || continue;",
-    "  printf 'file=%s\\n' \"$f\";",
-    "  printf 'current=%s\\n' \"$(kubectl --kubeconfig=\"$f\" config current-context 2>/dev/null)\";",
-    "  kubectl --kubeconfig=\"$f\" config view -o jsonpath='{range .contexts[*]}{.name}|{.context.cluster}|{.context.namespace}{\"\\n\"}{end}'",
-    "    2>/dev/null | sed '/^$/d; s/^/ctx=/';",
-    "  kubectl --kubeconfig=\"$f\" config view -o jsonpath='{range .clusters[*]}{.name}|{.cluster.server}{\"\\n\"}{end}'",
-    "    2>/dev/null | sed '/^$/d; s/^/cluster=/';",
-    "done;",
-    "unset IFS"
-  ].join(" "))
-}
-
-// Reachability for every context at once. Serially this would take as long as
-// the sum of the failures; in parallel it takes as long as the slowest one,
-// and the timeouts bound that.
+// Reachability for the bound context only. Extra files in ~/.kube are listed
+// by parsing them; they are not probed until the user picks a row.
 function probeScript(entries) {
   if (!entries || entries.length === 0) return "true"
   var jobs = []

@@ -6,15 +6,17 @@ import "Model.js" as Model
 // All state for the Kubernetes context widget.
 //
 // The cheap half — which contexts exist and which one is selected — is a
-// kubeconfig read and runs on a plain timer. Extra files in ~/.kube are
-// included there; identity is (file, name). The expensive half only runs
-// while the panel is open. The picker is not "looking", so `detailed`
-// stays false for it.
+// local parse of kubeconfig files (no kubectl) and runs on a plain timer.
+// Extra files in ~/.kube are included there; identity is (file, name).
+// Talking to a cluster (probe, overview, namespaces) only happens for the
+// bound context, and only while the panel is open. The picker is not
+// "looking", so `detailed` stays false for it.
 Item {
   id: root
 
   property var settings: ({})
   property bool detailed: false
+  readonly property string listKubeconfigs: Qt.resolvedUrl("list_kubeconfigs.py").toString().replace(/^file:\/\//, "")
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -90,8 +92,10 @@ Item {
     contextsProc.running = true
   }
 
-  function probeAll() {
-    if (!detailed || contexts.length === 0 || probeProc.running) return
+  function probeCurrent() {
+    if (!detailed || !currentContext || !activeFile || probeProc.running) return
+    probeProc.requestedFile = activeFile
+    probeProc.requestedName = currentContext
     probeProc.running = true
   }
 
@@ -111,17 +115,18 @@ Item {
 
   function refreshKind() {
     if (!detailed || kindProc.running) return
-    var list = []
-    for (var i = 0; i < contexts.length; i++) {
-      if (Model.kindClusterName(contexts[i])) list.push(contexts[i])
+    if (!currentEntry || !Model.kindClusterName(currentEntry)) {
+      kindStates = ({})
+      return
     }
-    if (list.length === 0) { kindStates = ({}); return }
+    kindProc.requestedFile = currentEntry.file
+    kindProc.requestedName = currentEntry.name
     kindProc.running = true
   }
 
   function refreshAll() {
     refreshContexts()
-    probeAll()
+    probeCurrent()
     refreshOverview()
     refreshNamespaces()
     refreshKind()
@@ -136,7 +141,7 @@ Item {
       activeFile = entry.file
       applyCurrentFlags()
       if (detailed) {
-        probeAll()
+        probeCurrent()
         refreshOverview()
         refreshNamespaces()
         refreshKind()
@@ -273,7 +278,7 @@ Item {
 
   Process {
     id: contextsProc
-    command: ["bash", "-lc", Model.contextsScript()]
+    command: ["python3", root.listKubeconfigs]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.applyContexts(text) }
     onExited: {
       if (root.contextsQueued) {
@@ -285,10 +290,19 @@ Item {
 
   Process {
     id: probeProc
-    command: ["bash", "-lc", Model.probeScript(root.contexts)]
+    property string requestedFile: ""
+    property string requestedName: ""
+    command: ["bash", "-lc", Model.probeScript([{ file: requestedFile, name: requestedName }])]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.probes = Model.parseProbes(text)
+      onStreamFinished: {
+        var req = Model.rowKey({ file: probeProc.requestedFile, name: probeProc.requestedName })
+        if (req !== root.currentKey) {
+          Qt.callLater(function () { root.probeCurrent() })
+          return
+        }
+        root.probes = Model.parseProbes(text)
+      }
     }
   }
 
@@ -332,10 +346,19 @@ Item {
 
   Process {
     id: kindProc
-    command: ["bash", "-lc", Model.kindStatusScript(root.contexts)]
+    property string requestedFile: ""
+    property string requestedName: ""
+    command: ["bash", "-lc", Model.kindStatusScript([{ file: requestedFile, name: requestedName }])]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.kindStates = Model.parseKindStatus(text)
+      onStreamFinished: {
+        var req = Model.rowKey({ file: kindProc.requestedFile, name: kindProc.requestedName })
+        if (req !== root.currentKey) {
+          Qt.callLater(function () { root.refreshKind() })
+          return
+        }
+        root.kindStates = Model.parseKindStatus(text)
+      }
     }
   }
 
@@ -358,8 +381,10 @@ Item {
         root.namespacesFor = ""
         root.refreshContexts()
         if (root.detailed) {
+          root.probeCurrent()
           root.refreshOverview()
           root.refreshNamespaces()
+          root.refreshKind()
         }
         root.switched(name, true, "switched")
       } else {
@@ -427,7 +452,7 @@ Item {
     interval: 8000
     repeat: false
     onTriggered: {
-      root.probeAll()
+      root.probeCurrent()
       root.refreshOverview()
       root.refreshNamespaces()
       root.refreshKind()
@@ -448,7 +473,7 @@ Item {
     repeat: true
     triggeredOnStart: true
     onTriggered: {
-      root.probeAll()
+      root.probeCurrent()
       root.refreshOverview()
       root.refreshNamespaces()
       root.refreshKind()
@@ -456,7 +481,7 @@ Item {
   }
 
   onDetailedChanged: if (detailed) {
-    probeAll()
+    probeCurrent()
     refreshOverview()
     refreshNamespaces()
     refreshKind()
@@ -467,5 +492,9 @@ Item {
     namespaces = []
     namespacesReady = false
     namespacesFor = ""
+    if (detailed) {
+      probeCurrent()
+      refreshKind()
+    }
   }
 }

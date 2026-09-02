@@ -17,6 +17,9 @@ aktuellen Namespace und gibt einen kurzen Überblick über den gewählten Cluste
   lokaler Write; kein API-Server wird kontaktiert.
 - **Contexts** — jede Kubeconfig-Datei direkt in `~/.kube` (nicht `cache/`),
   gruppiert nach Datei. Zwei Files mit Context `default` bleiben zwei Zeilen.
+  Die Liste ist ein lokales YAML/JSON-Parse — `kubectl` läuft nicht gegen
+  Extra-Dateien, damit ein Credential-`exec`-Plugin in einer Datei, die du
+  nicht gewählt hast, beim Öffnen des Panels nicht startet.
   Wechsel in `~/.kube/config` erben neue Shells. Wechsel in einer anderen Datei
   bindet **dieses Widget** (`--kubeconfig`); neue Terminals bleiben auf der
   Default-Datei.
@@ -38,10 +41,10 @@ Endpunkt, dessen DNS nicht auflöst, ein API-Server, der schlicht nie antwortet 
 und dieses Widget läuft in dem Prozess, der deinen Desktop zeichnet. Also:
 
 - Solange das Panel zu ist, verlässt nichts die Maschine.
+- Extra-Kubeconfigs werden ohne `kubectl` gelesen. Nur der gebundene Context
+  wird geprobt (`kubectl get --raw /version`), und nur bei offenem Panel.
 - Jeder Aufruf ist doppelt begrenzt, durch `kubectl --request-timeout` und durch
   ein äußeres `timeout`. Ein toter Cluster kostet damit Sekunden statt ewig.
-- Die Erreichbarkeit aller Contexts wird parallel geprüft. Es wartet also der
-  langsamste, statt der Summe aller.
 - Ein Cluster, der nicht antwortet, wird als nicht erreichbar gemeldet, nie als
   leerer Cluster mit null Nodes und null Pods.
 - Ein `kind-*`-Context, dessen Node-Container nicht läuft, wird als **Kind
@@ -121,7 +124,7 @@ Docker an.
 | `showNamespace` | `false` | hängt `/namespace` an das Bar-Label |
 | `maxLabel` | `18` | längere Namen werden in der Bar gekürzt |
 | `contextIntervalSec` | `5` | wie oft die kubeconfig neu gelesen wird (lokal, kein Netz) |
-| `probeIntervalSec` | `30` | wie oft Cluster kontaktiert werden, solange das Panel offen ist |
+| `probeIntervalSec` | `30` | wie oft der gebundene Cluster kontaktiert wird, solange das Panel offen ist |
 
 ## IPC
 
@@ -140,7 +143,7 @@ omarchy-shell io.github.nepomuk-software.kubecontext <method> [context]
 | `useIn <file> <context>` | dasselbe, Datei als eigenes Argument |
 | `useNamespace <name>` | Namespace des aktuellen Contexts setzen |
 | `kindStart` `kindStop` | Kind-Node-Container des aktuellen `kind-*`-Contexts starten oder stoppen |
-| `refresh` | kubeconfig neu lesen; Probe und Überblick nur bei offenem Panel |
+| `refresh` | kubeconfig neu lesen; Probe des gebundenen Contexts und Überblick nur bei offenem Panel |
 | `status` | `<context> reachable <version> nodes=r/t pods=r/t ns=n`, sonst `unreachable`, `unprobed`, `no kubectl` |
 
 ## Lizenz

@@ -16,7 +16,9 @@ namespace, and gives a short overview of the selected cluster.
   no API server is contacted.
 - **Contexts** — every kubeconfig file sitting directly in `~/.kube` (not
   `cache/`), grouped by file. Two files that both have a context named
-  `default` are two rows.
+  `default` are two rows. Listing is a local YAML/JSON parse — `kubectl` is
+  not run against extra files, so a credential `exec` plugin in a file you
+  did not pick cannot start when the panel opens.
   Switching a context in `~/.kube/config` is what new shells inherit. Switching
   in another file binds **this widget** to that file (`--kubeconfig`); new
   terminals still use the default.
@@ -36,10 +38,10 @@ resolve, an API server that simply never answers — and this widget lives insid
 the process that draws your desktop. So:
 
 - Nothing leaves the machine while the panel is closed.
+- Extra kubeconfigs are listed without `kubectl`. Only the bound context is
+  probed (`kubectl get --raw /version`), and only while the panel is open.
 - Every call is bounded twice, by `kubectl --request-timeout` and by an outer
   `timeout`, so a dead cluster costs seconds rather than forever.
-- Reachability is probed for all contexts in parallel, so the slowest one sets
-  the wait instead of the sum of them.
 - A cluster that does not answer is reported as unreachable, never as an empty
   cluster with zero nodes and zero pods.
 - A `kind-*` context whose node container is not running is reported as
@@ -119,7 +121,7 @@ cluster or Docker.
 | `showNamespace` | `false` | append `/namespace` to the bar label |
 | `maxLabel` | `18` | longer names are elided in the bar |
 | `contextIntervalSec` | `5` | how often the kubeconfig is re-read (local, no network) |
-| `probeIntervalSec` | `30` | how often clusters are contacted while the panel is open |
+| `probeIntervalSec` | `30` | how often the bound cluster is contacted while the panel is open |
 
 ## IPC
 
@@ -138,7 +140,7 @@ omarchy-shell io.github.nepomuk-software.kubecontext <method> [context]
 | `useIn <file> <context>` | same, with the file as its own argument |
 | `useNamespace <name>` | set the current context's namespace |
 | `kindStart` `kindStop` | start or stop the Kind node containers for the current `kind-*` context |
-| `refresh` | re-read kubeconfig; probe and overview only while the panel is open |
+| `refresh` | re-read kubeconfig; probe the bound context and overview only while the panel is open |
 | `status` | `<context> reachable <version> nodes=r/t pods=r/t ns=n`, or `unreachable`, `unprobed`, `no kubectl` |
 
 ## License

@@ -11,8 +11,9 @@ import "Model.js" as Model
 //   left = panel · right = context picker · middle = refresh
 //
 // Writes are explicit clicks: use-context / set-namespace on the row's file,
-// and Kind start/stop. Extra files bind this widget only (--kubeconfig);
-// they are not exported into new shells. The picker never talks to a cluster.
+// and Kind start/stop. Extra files are listed by parsing them, then bind this
+// widget only (--kubeconfig); they are not exported into new shells and are
+// not probed until picked. The picker never talks to a cluster.
 Panel {
   id: root
   moduleName: "io.github.nepomuk-software.kubecontext"
@@ -494,7 +495,7 @@ Panel {
               textFormat: Text.PlainText
               visible: kube.kubectlMissing
               width: parent.width
-              text: "kubectl was not found on PATH, so there is nothing to read."
+              text: "kubectl was not found on PATH, so the widget cannot switch or probe a cluster."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -503,7 +504,7 @@ Panel {
 
             Text {
               textFormat: Text.PlainText
-              visible: !kube.kubectlMissing && kube.contexts.length === 0
+              visible: kube.contexts.length === 0
               width: parent.width
               text: "No contexts in the kubeconfig."
               color: root.dim
